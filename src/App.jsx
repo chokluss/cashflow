@@ -1,12 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DEFAULT, f, mi, calc, settle, sync, debtBalPatch, cycleSummary, cycleGroups, openCycle } from "./logic.js";
-import { loadData, saveData } from "./auth.js";
+import { saveData } from "./auth.js";
 import { AccountCard, UsersCard } from "./Account.jsx";
 
-// each user has their own data
-function load(userId) {
-  return { ...structuredClone(DEFAULT), ...(loadData(userId) || {}) };
-}
+// the saved document of the signed-in user, completed with the defaults
+const load = (data) => ({ ...structuredClone(DEFAULT), ...(data || {}) });
 
 function useNow(ms = 50) {
   const [now, setNow] = useState(Date.now());
@@ -439,6 +437,46 @@ function ConfirmButton({ label, onConfirm }) {
   );
 }
 
+// move your data in or out: a JSON file, or what an older version saved in this browser
+function Backup({ S, set }) {
+  const [msg, setMsg] = useState("");
+  const legacy = (() => {
+    try {
+      const k = Object.keys(localStorage).find((x) => x.startsWith("cashflow:data:") || x.startsWith("cashflow-clp-"));
+      return k ? JSON.parse(localStorage.getItem(k)) : null;
+    } catch { return null; }
+  })();
+  const apply = (obj) => {
+    if (!obj || !Array.isArray(obj.tx) || !Array.isArray(obj.debts)) { setMsg("That file doesn't look like a Cashflow Live backup."); return; }
+    if (!window.confirm("Replace your current data with this backup?")) return;
+    set(() => ({ ...structuredClone(DEFAULT), ...obj }));
+    setMsg("Data imported.");
+  };
+  return (
+    <div className="card">
+      <div className="lbl">Backup</div>
+      <div className="sub" style={{ margin: "8px 0 12px" }}>Download your data, or load a backup file. Your data is also saved online automatically.</div>
+      <button className="go sm" style={{ margin: 0 }} onClick={() => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 2)], { type: "application/json" }));
+        a.download = "cashflow-backup.json";
+        a.click();
+      }}>Export my data</button>
+      <label className="go sm" style={{ display: "block", textAlign: "center", cursor: "pointer", marginTop: 8 }}>
+        Import from a file
+        <input type="file" accept="application/json,.json" hidden onChange={async (e) => {
+          const file = e.target.files[0];
+          e.target.value = "";
+          if (!file) return;
+          try { apply(JSON.parse(await file.text())); } catch { setMsg("Could not read that file."); }
+        }} />
+      </label>
+      {legacy && <button className="go sm" style={{ marginTop: 8 }} onClick={() => apply(legacy)}>Import data found in this browser (older version)</button>}
+      {msg && <div className="sub" style={{ marginTop: 8 }}>{msg}</div>}
+    </div>
+  );
+}
+
 function ClearData({ set }) {
   return (
     <div className="card">
@@ -500,6 +538,7 @@ function Plan({ S, c, set, user, setUser, onLogout }) {
           Money left at the end of each pay cycle moves to your goals automatically, in the order listed (use ↑ to change the priority). If every goal is met, or you have none, it goes to a Savings item. Each projection assumes your net income per second stays the same.
         </div>
       </div>
+      <Backup S={S} set={set} />
       <ClearData set={set} />
     </>
   );
@@ -579,8 +618,8 @@ const PAGES = { home: Home, moves: Movements, hist: History, plan: Plan };
 const TITLES = { home: "Live", moves: "Movements", hist: "History", plan: "Plan & settings" };
 const TABS = [["home", "◉", "Live"], ["moves", "☰", "Moves"], ["hist", "▦", "History"], ["plan", "★", "Plan"]];
 
-export default function App({ user, setUser, onLogout }) {
-  const [S, setS] = useState(() => sync(settle(load(user.id))));
+export default function App({ user, setUser, onLogout, initial }) {
+  const [S, setS] = useState(() => sync(settle(load(initial.data))));
   const [tab, setTab] = useState("home");
   const [sheet, setSheet] = useState(false);
   const [acct, setAcct] = useState(false); // account page, opened from the profile picture
@@ -588,9 +627,44 @@ export default function App({ user, setUser, onLogout }) {
   const now = useNow();
   const c = calc(S, now);
 
+  // ---- saving to the database: shortly after a change, and when the tab is hidden ----
+  const rev = useRef(initial.rev); // version we last saved or loaded
+  const latest = useRef(S);
+  const savedJson = useRef(JSON.stringify(initial.data || {}));
+  const saving = useRef({ busy: false, again: false });
+  const [conflict, setConflict] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+  const flush = async () => {
+    const st = saving.current;
+    if (st.busy) { st.again = true; return; }
+    st.busy = true;
+    try {
+      do {
+        st.again = false;
+        const json = JSON.stringify(latest.current);
+        if (json === savedJson.current) break;
+        rev.current = await saveData(user.id, latest.current, rev.current);
+        savedJson.current = json;
+      } while (st.again);
+      setSaveErr("");
+    } catch (e) {
+      if (e.message === "CONFLICT") setConflict(true);
+      else setSaveErr("Could not save. Check your connection; we'll retry.");
+    } finally {
+      st.busy = false;
+    }
+  };
   useEffect(() => {
-    saveData(user.id, S);
-  }, [S]);
+    latest.current = S;
+    if (conflict) return;
+    const t = setTimeout(flush, 800);
+    return () => clearTimeout(t);
+  }, [S, conflict, saveErr]);
+  useEffect(() => {
+    const h = () => document.visibilityState === "hidden" && flush();
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+  }, []);
 
   useEffect(() => {
     if (S.cycleKey !== c.key || c.needBorrow) setS((x) => sync(settle(x))); // payday passed: close the cycle
@@ -603,6 +677,10 @@ export default function App({ user, setUser, onLogout }) {
 
   return (
     <div className="app">
+      {conflict && (
+        <div className="banner">Your data was changed on another device. <button onClick={() => window.location.reload()}>Reload</button></div>
+      )}
+      {saveErr && !conflict && <div className="banner">{saveErr}</div>}
       <header>
         <h1>Cashflow Live</h1>
         <div className="live"><span className="dot" />ticking</div>
