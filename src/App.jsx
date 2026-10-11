@@ -32,13 +32,13 @@ function useWide() {
 
 /* ---------------- Live tab ---------------- */
 
-function Gauge({ s }) {
+function Gauge({ s, v, vmax }) {
   const pc = Math.round(s * 100) || 0;
   const label =
     s >= 0.999 ? "MAX SPEED · all income, no payments"
     : Math.abs(s) < 0.005 ? "STALL · income equals outflow"
     : s < 0 ? "REVERSE · spending more than you earn"
-    : `Moving forward · ${pc}% of your income is left over`;
+    : `Moving forward · ${pc}% of max speed`;
   return (
     <div className="card" style={{ textAlign: "center" }}>
       <div className="lbl" style={{ textAlign: "left" }}>Money speed</div>
@@ -59,8 +59,9 @@ function Gauge({ s }) {
           <circle cx="100" cy="100" r="6" fill="currentColor" />
         </g>
       </svg>
-      <div className="big" style={{ fontSize: 30, margin: 0, color: pc < 0 ? "var(--neg)" : undefined }}>{pc > 0 ? "+" : ""}{pc}%</div>
+      <div className="big" style={{ fontSize: 28, margin: 0, color: v < 0 ? "var(--neg)" : undefined }}>{v >= 0 ? "+" : "-"}{f(Math.abs(v), 3)} CLP / sec</div>
       <div className="sub">{label}</div>
+      <div className="sub" style={{ marginTop: 4, fontSize: 12 }}>Max speed {f(vmax, 3)} CLP / sec · cash flow only (card charges count when you pay the card)</div>
     </div>
   );
 }
@@ -81,30 +82,42 @@ function GoalCard({ g }) {
   );
 }
 
-function DebtCard({ x }) {
+function DebtCard({ x, next }) {
   if (!x.show) return null;
   const card = x.kind === "card", loan = x.kind === "loan", bor = x.kind === "borrowed";
+  const nd = next.toLocaleDateString([], { day: "numeric", month: "short" });
   return (
     <div className="card">
       <div className="lbl">{(x.name || "Debt") + (card ? " · credit card" : loan ? " · loan" : "")}</div>
-      <div className="big">{f(x.debt, 2)}</div>
-      <div className="sub">{x.drate <= 0 ? "-" : "+"}{f(Math.abs(x.drate), 3)} CLP / sec</div>
+      <div className="big">{f(x.debt, bor ? 2 : 0)}</div>
+      {card ? (
+        <div className="sub">
+          Charged this cycle {f(x.charged)}{x.pendingBills > 0 ? ` · monthly bills ${f(x.pendingBills)} added at payday` : ""} · Paid {f(x.one)}
+        </div>
+      ) : loan ? (
+        <div className="sub">{x.pc > 0 ? `Next installment ${f(x.pc)} on ${nd}` : x.skipped ? "Installment skipped this month" : ""}</div>
+      ) : (
+        <div className="sub">{x.drate <= 0 ? "-" : "+"}{f(Math.abs(x.drate), 3)} CLP / sec</div>
+      )}
       {(card || loan) && (
         <>
           <div className="bar"><i style={{ width: (card ? x.usedPct : x.loanPct) + "%", background: card && x.usedPct > 85 ? "var(--neg)" : undefined }} /></div>
           <div className="sub" style={{ marginTop: 6 }}>
             {card
               ? x.limit > 0 ? `Used ${f(x.debt)} of ${f(x.limit)} · Available ${f(x.avail)}` : "Set your credit limit in the Plan tab"
-              : `Paid ${f(x.loanPaid)} of ${f(x.total)} total (${x.loanPct.toFixed(1).replace(".", ",")}%)`}
+              : x.debt > 0
+              ? `Installment ${Math.min(x.count, x.instN + 1)} of ${x.count} · ${f(x.installment)} each · Paid ${f(x.loanPaid)} of ${f(x.total)} (${x.loanPct.toFixed(1).replace(".", ",")}%)`
+              : "Loan finished"}
+          </div>
+          <div className="sub" style={{ marginTop: 4 }}>
+            {loan && x.one > 0 ? `Prepaid this cycle: ${f(x.one)} · ` : ""}Status — updates at payday or when you make a debt payment
           </div>
         </>
       )}
       {bor && <div className="sub" style={{ marginTop: 6 }}>No limit · no monthly installments</div>}
-      <div className="sub" style={{ marginTop: 4 }}>
-        {bor ? (x.added > 0 ? `Added since payday: ${f(x.added)}` : "") : `Paid since payday: ${f(x.paid)}${x.skipped ? " (skipped this cycle)" : ""}`}
-      </div>
+      {bor && x.added > 0 && <div className="sub" style={{ marginTop: 4 }}>Added since payday: {f(x.added)}</div>}
       {x.def > 0 && <div className="rec" style={{ marginTop: 10 }}>Your income doesn't cover your payments — {f(x.def)} per cycle is being borrowed</div>}
-      <div className="sub" style={{ marginTop: 10 }}>{x.payoff}</div>
+      {x.payoff && <div className="sub" style={{ marginTop: 10 }}>{x.payoff}</div>}
     </div>
   );
 }
@@ -115,8 +128,8 @@ function Home({ c }) {
   return (
     <>
       <div className="card">
-        <div className="proj"><span>Projected at payday</span><b className={c.projected < 0 ? "neg" : "pos"}>{f(c.projected)}</b></div>
-        <div className="proj" style={{ marginTop: -6 }}><span>Total spending this cycle</span><b className="neg">{f(c.billsTotal + c.purchases)}</b></div>
+        <div className="proj" title="The balance this cycle would close with if nothing else changes"><span>Projected at payday{c.projBorrow > 0 ? ` · ${f(c.projBorrow)} borrowed` : ""}</span><b className={c.projected < 0 ? "neg" : "pos"}>{f(c.projected)}</b></div>
+        <div className="proj" style={{ marginTop: -6 }}><span>Total spending this cycle</span><b className="neg">{f(c.spending)}</b></div>
         <div className="lbl">Available this cycle</div>
         <div className={"big" + (neg ? " neg" : "")}>{f(c.bal, 2)}</div>
         <div className={"sub rates " + (c.net < 0 ? "neg" : "pos")}>
@@ -128,9 +141,9 @@ function Home({ c }) {
         <div className="bar"><i style={{ width: c.pct + "%" }} /></div>
         <div className="sub" style={{ marginTop: 6 }}>{c.pct.toFixed(1)}% of the pay cycle elapsed · leftover moves to your goals at payday</div>
       </div>
-      <Gauge s={c.speed} />
+      <Gauge s={c.speed} v={c.speedV} vmax={c.speedMax} />
       {c.goals.map((g) => <GoalCard key={g.id} g={g} />)}
-      {c.debts.map((x) => <DebtCard key={x.id} x={x} />)}
+      {c.debts.map((x) => <DebtCard key={x.id} x={x} next={c.next} />)}
       <div className="grid">
         <div className="stat"><span className="lbl">Accrued income</span><b>{f(c.inc)}</b></div>
         <div className="stat"><span className="lbl">Accrued bills</span><b className="neg">{f(c.bil + c.paidSum)}</b></div>
@@ -143,63 +156,91 @@ function Home({ c }) {
 
 const dShort = (ms) => new Date(ms).toLocaleDateString([], { day: "numeric", month: "short" });
 
-function Row({ t, debtName, onDel, skipped, onSkip }) {
-  const isIn = t.type === "in";
-  const credit = t.type === "credit";
+function Row({ t, debtName, cardName, onDel, skipped, onSkip, onEdit }) {
+  const isIn = t.type === "in", credit = t.type === "credit", pay = t.type === "pay";
+  const icon = isIn ? "↓" : pay ? "⇄" : cardName ? "💳" : t.type === "bill" || credit ? "↻" : "↑";
+  const when = new Date(t.id).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const sub = credit
+    ? `Loan installment · ${debtName || "loan"}${skipped ? " · skipped this month" : " · monthly"}`
+    : pay ? `Payment to ${debtName || "debt"} · ${when}`
+    : t.type === "bill" ? (cardName ? `Monthly bill · charged to ${cardName}` : "Monthly bill")
+    : cardName ? `Charged to ${cardName} · ${when}` : when;
   return (
     <div className="tx">
-      <div className={"ic " + (isIn ? "pos" : "neg")}>{isIn ? "↓" : t.type === "bill" ? "↻" : credit ? "💳" : "↑"}</div>
-      <div className="m">
-        <div>{t.label}</div>
-        <div className="sub">
-          {credit
-            ? `Credit payment · ${debtName || "debt"}${skipped ? " · skipped this month" : " · monthly"}`
-            : t.type === "bill"
-            ? "Monthly bill"
-            : new Date(t.id).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
-        </div>
-      </div>
+      <div className={"ic " + (isIn ? "pos" : "neg")}>{icon}</div>
+      <div className="m"><div>{t.label}</div><div className="sub">{sub}</div></div>
       <b className={isIn ? "pos" : "neg"} style={skipped ? { textDecoration: "line-through", opacity: 0.6 } : undefined}>
         {isIn ? "+" : "-"}{f(t.amt)}
       </b>
       {credit && <button className="skipb" onClick={onSkip}>{skipped ? "Restore" : "Skip"}</button>}
-      <button aria-label="Delete" onClick={onDel}>✕</button>
+      {onEdit && <button aria-label="Edit" onClick={onEdit}>✎</button>}
+      {!t.auto && <button aria-label="Delete" onClick={onDel}>✕</button>}
+    </div>
+  );
+}
+
+function EditSheet({ t, onClose, onSave }) {
+  const [label, setLabel] = useState(t.label);
+  const [amt, setAmt] = useState(String(t.amt));
+  return (
+    <div className="scrim on" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="sheet">
+        <div className="lbl">Edit movement</div>
+        <label htmlFor="el">Description</label>
+        <input id="el" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <label htmlFor="ea">Amount (CLP)</label>
+        <input id="ea" type="number" inputMode="decimal" min="0" autoFocus value={amt} onChange={(e) => setAmt(e.target.value)} />
+        <div className="cols" style={{ marginTop: 14 }}>
+          <button className="go sm" style={{ margin: 0 }} onClick={onClose}>Cancel</button>
+          <button className="go" style={{ margin: 0 }} onClick={() => Math.abs(+amt) > 0 && onSave(label.trim() || t.label, Math.abs(+amt))}>Save</button>
+        </div>
+      </div>
     </div>
   );
 }
 
 function Movements({ S, c, set, onAdd }) {
-  const del = (id) =>
-    set((s) => {
-      const t = s.tx.find((x) => x.id === id);
-      return { tx: s.tx.filter((x) => x.id !== id), debts: t?.auto ? s.debts.map((d) => (d.id === t.debt ? { ...d, installment: 0 } : d)) : s.debts };
-    });
+  const [editing, setEditing] = useState(null);
+  const startC = c.start.getTime();
+  // loan installments are managed from the loan; one-time movements of closed cycles are history
+  const canEdit = (t) => !t.auto && (t.type === "bill" || t.type === "credit" || t.id >= startC);
+  const del = (id) => set((s) => ({ tx: s.tx.filter((t) => t.id !== id) }));
   const skip = (id) => set((s) => ({ tx: s.tx.map((t) => (t.id === id ? { ...t, skip: t.skip === c.key ? -1 : c.key } : t)) }));
+  const dn = (id) => S.debts.find((x) => x.id === id)?.name;
   const bills = S.tx.filter((t) => t.type === "bill" || t.type === "credit");
   const others = S.tx.filter((t) => t.type !== "bill" && t.type !== "credit").reverse();
   return (
     <>
-      <button className="addbtn" onClick={onAdd}>＋ Add bill, purchase, credit payment or income</button>
+      <button className="addbtn" onClick={onAdd}>＋ Add bill, purchase, debt payment or income</button>
       <div className="card">
         <div className="lbl">Totals</div>
-        <div className="tot"><span>Monthly bills</span><span className="neg">{f(c.billsTotal)}</span></div>
-        <div className="tot"><span>Purchases (this cycle)</span><span className="neg">{f(c.purchases)}</span></div>
+        <div className="tot"><span>Monthly bills (cash)</span><span className="neg">{f(c.billsTotal)}</span></div>
+        <div className="tot"><span>Purchases (this cycle)</span><span className="neg">{f(c.purchasesAll)}</span></div>
+        {c.cardCharged > 0 && <div className="tot"><span>Charged to credit cards</span><span>{f(c.cardCharged)}</span></div>}
+        {c.payOne > 0 && <div className="tot"><span>Debt payments</span><span className="neg">{f(c.payOne)}</span></div>}
         <div className="tot"><span>Extra income (this cycle)</span><span className="pos">{f(c.incomeX)}</span></div>
       </div>
-      {S.tx.length === 0 && <div className="empty">Nothing added yet.<br />Tap “Add” to log a bill, a purchase, a credit payment or extra income.</div>}
+      {S.tx.length === 0 && <div className="empty">Nothing added yet.<br />Tap “Add” to log a bill, a purchase, a debt payment or extra income.</div>}
       {bills.length > 0 && (
         <>
           <h2>Monthly bills</h2>
           {bills.map((t) => (
-            <Row key={t.id} t={t} debtName={S.debts.find((x) => x.id === t.debt)?.name} onDel={() => del(t.id)} skipped={t.skip === c.key} onSkip={() => skip(t.id)} />
+            <Row key={t.id} t={t} debtName={dn(t.debt)} cardName={t.card ? dn(t.card) : undefined} onDel={() => del(t.id)} skipped={t.skip === c.key} onSkip={() => skip(t.id)} onEdit={canEdit(t) ? () => setEditing(t.id) : undefined} />
           ))}
         </>
       )}
       {others.length > 0 && (
         <>
-          <h2>Purchases &amp; income</h2>
-          {others.map((t) => <Row key={t.id} t={t} onDel={() => del(t.id)} />)}
+          <h2>Purchases, payments &amp; income</h2>
+          {others.map((t) => <Row key={t.id} t={t} debtName={dn(t.debt)} cardName={t.card ? dn(t.card) : undefined} onDel={() => del(t.id)} onEdit={canEdit(t) ? () => setEditing(t.id) : undefined} />)}
         </>
+      )}
+      {editing != null && S.tx.find((t) => t.id === editing) && (
+        <EditSheet
+          t={S.tx.find((t) => t.id === editing)}
+          onClose={() => setEditing(null)}
+          onSave={(label, amt) => { set((s) => ({ tx: s.tx.map((t) => (t.id === editing ? { ...t, label, amt } : t)) })); setEditing(null); }}
+        />
       )}
     </>
   );
@@ -290,62 +331,64 @@ function History({ S, c }) {
 const num = (v) => +v || 0;
 
 function DebtRow({ x, c, set }) {
-  const kind = x.kind, bor = kind === "borrowed";
-  const live = c.debts.find((o) => o.id === x.id)?.debt ?? 0;
-  // card: u = used credit, a = available credit | loan: u = total loan, a = already paid | borrowed: u = balance
-  const [u, setU] = useState(() => String(Math.round(kind === "loan" ? +x.total || 0 : live)));
-  const [a, setA] = useState(() => String(Math.round(kind === "loan" ? Math.max(0, (+x.total || 0) - live) : +x.limit || 0)));
-  const patch = (s, fields, bal) => (bal == null ? s.debts : debtBalPatch(s, x.id, bal)).map((o) => (o.id === x.id ? { ...o, ...fields } : o));
-  const onU = (v) => {
-    setU(v);
-    if (kind === "loan") set((s) => ({ debts: patch(s, { total: num(v) }, Math.max(0, num(v) - num(a))) }));
-    else {
-      set((s) => ({ debts: patch(s, {}, num(v)) }));
-    }
-  };
-  const onA = (v) => {
-    setA(v);
-    if (kind === "loan") set((s) => ({ debts: patch(s, {}, Math.max(0, (+x.total || 0) - num(v))) }));
-    else set((s) => ({ debts: patch(s, { limit: num(v) }) }));
-  };
-  const L = bor ? ["Balance (CLP)"] : kind === "loan" ? ["Total loan (CLP)", "Already paid (CLP)"] : ["Used credit (CLP)", "Available credit (CLP)"];
+  const kind = x.kind, bor = kind === "borrowed", loan = kind === "loan";
+  const liveDebt = c.debts.find((o) => o.id === x.id)?.debt ?? 0;
+  const [u, setU] = useState(() => String(Math.round(liveDebt))); // card: used credit | borrowed: balance
+  const [lim, setLim] = useState(() => String(Math.round(+x.limit || 0))); // card: available credit (the limit)
+  const [cnt, setCnt] = useState(() => String(+x.count || 0));
+  const [amt, setAmt] = useState(() => String(+x.installment || 0));
+  const [pd, setPd] = useState(() => String(+x.installment > 0 ? Math.max(0, Math.round((+x.count || 0) - liveDebt / x.installment)) : 0));
+  const setBal = (s, fields, bal) => debtBalPatch(s, x.id, bal).map((o) => (o.id === x.id ? { ...o, ...fields } : o));
+  const loanUpd = (n, m, p) => set((s) => ({ debts: setBal(s, { count: n, installment: m }, Math.max(0, (n - p) * m)) }));
+  const input = (value, onChange) => <input type="number" inputMode="decimal" min="0" value={value} onChange={(e) => onChange(e.target.value)} />;
   return (
     <div className="item">
       <div className="hd">
-        <input placeholder="Name (credit card, loan…)" value={x.name} disabled={bor}
+        <input placeholder={loan ? "Loan name (car, house…)" : "Name (credit card…)"} value={x.name} disabled={bor}
           onChange={(e) => set((s) => ({ debts: s.debts.map((o) => (o.id === x.id ? { ...o, name: e.target.value } : o)) }))} />
         {!bor && (
           <button className="xb" aria-label="Remove debt"
-            onClick={() => set((s) => ({ debts: s.debts.filter((o) => o.id !== x.id), tx: s.tx.filter((t) => !(t.type === "credit" && t.debt === x.id)) }))}>✕</button>
-        )}
-      </div>
-      <div className="cols">
-        <div>
-          <div className="mini">{L[0]}</div>
-          <input type="number" inputMode="decimal" min="0" value={u} onChange={(e) => onU(e.target.value)} />
-        </div>
-        {!bor && (
-          <div>
-            <div className="mini">{L[1]}</div>
-            <input type="number" inputMode="decimal" min="0" value={a} onChange={(e) => onA(e.target.value)} />
-          </div>
+            onClick={() => set((s) => ({
+              debts: s.debts.filter((o) => o.id !== x.id),
+              tx: s.tx.filter((t) => t.debt !== x.id && t.card !== x.id).map((t) => t),
+            }))}>✕</button>
         )}
       </div>
       {kind === "card" && (
-        <div className="sub" style={{ marginTop: 8 }}>
-          Left to use: <b>{f(Math.max(0, (+x.limit || 0) - live))}</b> (available credit minus used credit)
-        </div>
-      )}
-      {bor ? (
-        <div className="sub" style={{ marginTop: 8 }}>
-          Created automatically when your income doesn't cover your payments. No limit and no installments — pay it back whenever you can.
-        </div>
-      ) : (
         <>
-          <div className="mini">Monthly installment (CLP)</div>
-          <input type="number" inputMode="decimal" min="0" value={x.installment || 0}
-            onChange={(e) => set((s) => ({ debts: s.debts.map((o) => (o.id === x.id ? { ...o, installment: num(e.target.value) } : o)) }))} />
-          <div className="sub" style={{ marginTop: 6 }}>Shows up as a monthly movement in the Movements tab.</div>
+          <div className="cols">
+            <div><div className="mini">Used credit (CLP)</div>{input(u, (v) => { setU(v); set((s) => ({ debts: debtBalPatch(s, x.id, num(v)) })); })}</div>
+            <div><div className="mini">Available credit (CLP)</div>{input(lim, (v) => { setLim(v); set((s) => ({ debts: s.debts.map((o) => (o.id === x.id ? { ...o, limit: num(v) } : o)) })); })}</div>
+          </div>
+          <div className="sub" style={{ marginTop: 8 }}>
+            Left to use: <b>{f(Math.max(0, (+x.limit || 0) - liveDebt))}</b> (available credit minus used credit)
+          </div>
+          <div className="sub" style={{ marginTop: 6 }}>
+            No fixed installment: charge purchases and bills to this card when you add them in Movements, and pay it whenever you like with a debt payment.
+          </div>
+        </>
+      )}
+      {loan && (
+        <>
+          <div className="cols">
+            <div><div className="mini">Number of installments</div>{input(cnt, (v) => { setCnt(v); loanUpd(num(v), num(amt), num(pd)); })}</div>
+            <div><div className="mini">Each installment (CLP)</div>{input(amt, (v) => { setAmt(v); loanUpd(num(cnt), num(v), num(pd)); })}</div>
+          </div>
+          <div className="mini">Installments already paid</div>
+          {input(pd, (v) => { setPd(v); loanUpd(num(cnt), num(amt), num(v)); })}
+          <div className="sub" style={{ marginTop: 8 }}>
+            Total {f(num(cnt) * num(amt))} · Remaining <b>{f(liveDebt)}</b>
+          </div>
+          <div className="sub" style={{ marginTop: 6 }}>While the loan is active, its monthly installment appears automatically in Movements (you can skip a month there).</div>
+        </>
+      )}
+      {bor && (
+        <>
+          <div className="mini">Balance (CLP)</div>
+          {input(u, (v) => { setU(v); set((s) => ({ debts: debtBalPatch(s, x.id, num(v)) })); })}
+          <div className="sub" style={{ marginTop: 8 }}>
+            Created automatically when your income doesn't cover your payments. No limit and no installments — pay it back whenever you can.
+          </div>
         </>
       )}
     </div>
@@ -378,7 +421,7 @@ function GoalRow({ g, i, set }) {
   );
 }
 
-function ClearData({ set }) {
+function ConfirmButton({ label, onConfirm }) {
   const [sure, setSure] = useState(false);
   useEffect(() => {
     if (!sure) return;
@@ -386,21 +429,32 @@ function ClearData({ set }) {
     return () => clearTimeout(t);
   }, [sure]);
   return (
+    <button
+      className="go"
+      style={{ marginTop: 0, background: sure ? "var(--neg)" : "var(--chip)", color: sure ? "#fff" : "var(--ink)" }}
+      onClick={() => { if (sure) { onConfirm(); setSure(false); } else setSure(true); }}
+    >
+      {sure ? "Tap again to confirm" : label}
+    </button>
+  );
+}
+
+function ClearData({ set }) {
+  return (
     <div className="card">
       <div className="lbl">Data</div>
-      <div className="sub" style={{ margin: "8px 0 12px" }}>Remove every bill, purchase, credit payment and income entry you've added.</div>
-      <button
-        className="go"
-        style={{ marginTop: 0, background: sure ? "var(--neg)" : "var(--chip)", color: sure ? "#fff" : "var(--ink)" }}
-        onClick={() => { if (sure) { set({ tx: [] }); setSure(false); } else setSure(true); }}
-      >
-        {sure ? "Tap again to confirm" : "Clear all bills & movements"}
-      </button>
+      <div className="sub" style={{ margin: "8px 0 12px" }}>Remove every bill, purchase, debt payment and income entry you've added.</div>
+      <ConfirmButton label="Clear all bills & movements" onConfirm={() => set({ tx: [] })} />
+      <div className="sub" style={{ margin: "16px 0 12px" }}>
+        Delete all your closed months from the History tab. Your goals' saved money, debts and movements stay as they are.
+      </div>
+      <ConfirmButton label="Delete all history (closed cycles)" onConfirm={() => set({ cycles: [] })} />
     </div>
   );
 }
 
 function Plan({ S, c, set, user, setUser, onLogout }) {
+  const [newKind, setNewKind] = useState("card");
   return (
     <>
       <div className="card">
@@ -413,7 +467,7 @@ function Plan({ S, c, set, user, setUser, onLogout }) {
         <div className="sub" style={{ marginTop: 10 }}>
           Next payday: {c.next.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}
         </div>
-        <div className="tot"><span>Monthly bills (incl. credit payments)</span><span className="neg">{f(c.billsTotal)}</span></div>
+        <div className="tot"><span>Monthly bills (incl. loan installments)</span><span className="neg">{f(c.billsTotal)}</span></div>
         <div className="tot"><span>Net per cycle</span><span>{f(c.sal - c.billsTotal)}</span></div>
       </div>
 
@@ -421,12 +475,19 @@ function Plan({ S, c, set, user, setUser, onLogout }) {
         <div className="lbl">Debts</div>
         {S.debts.length === 0 && <div className="empty" style={{ padding: 8 }}>No debts yet.</div>}
         {S.debts.map((x) => <DebtRow key={x.id} x={x} c={c} set={set} />)}
-        <div className="cols">
-          <button className="go sm" onClick={() => set((s) => ({ debts: [...s.debts, { id: Date.now(), kind: "card", name: "", bal: 0, limit: 0, installment: 0 }] }))}>＋ Add credit card</button>
-          <button className="go sm" onClick={() => set((s) => ({ debts: [...s.debts, { id: Date.now(), kind: "loan", name: "", bal: 0, total: 0, installment: 0 }] }))}>＋ Add loan</button>
+        <div className="mini" style={{ marginTop: 14 }}>Add a debt — choose the type</div>
+        <div className="seg" style={{ margin: "6px 0 0" }}>
+          <button className={newKind === "card" ? "on" : ""} onClick={() => setNewKind("card")}>Credit card</button>
+          <button className={newKind === "loan" ? "on" : ""} onClick={() => setNewKind("loan")}>Loan</button>
         </div>
+        <button className="go sm" onClick={() => set((s) => ({
+          debts: [...s.debts, newKind === "card" ? { id: Date.now(), kind: "card", name: "", bal: 0, limit: 0 } : { id: Date.now(), kind: "loan", name: "", bal: 0, count: 0, installment: 0 }],
+        }))}>＋ Add {newKind === "card" ? "credit card" : "loan"}</button>
         <div className="sub" style={{ marginTop: 10 }}>
-          Each monthly installment shows up as a movement. If your income doesn't cover bills plus payments, the difference is borrowed automatically into a "Borrowed money" debt, with no limit and no installments.
+          {newKind === "card"
+            ? "Credit card: no fixed installments, since the amount changes every month. Charge purchases to it and pay it when you want."
+            : "Loan: set the number of installments and the amount of each one. While it is active, the installment shows up automatically in Movements."}
+          {" "}If your income doesn't cover bills plus installments, the difference is borrowed automatically into a "Borrowed money" debt.
         </div>
       </div>
 
@@ -440,8 +501,6 @@ function Plan({ S, c, set, user, setUser, onLogout }) {
         </div>
       </div>
       <ClearData set={set} />
-      <AccountCard user={user} setUser={setUser} onLogout={onLogout} />
-      {user.role === "admin" && <UsersCard user={user} />}
     </>
   );
 }
@@ -449,9 +508,9 @@ function Plan({ S, c, set, user, setUser, onLogout }) {
 /* ---------------- Add sheet ---------------- */
 
 const KINDS = [
-  ["purchase", "Purchase", "One-time: comes off your balance right away."],
-  ["bill", "Bill", "Monthly: spread evenly across every second of the pay cycle."],
-  ["credit", "Credit", "Credit payment: monthly like a bill, and it pays off the debt you choose. You can skip it in any month.", "Credit payment"],
+  ["purchase", "Purchase", "One-time: comes off your balance right away, unless you charge it to a credit card."],
+  ["bill", "Bill", "Monthly: spread evenly across every second of the pay cycle. You can charge it to a credit card."],
+  ["pay", "Payment", "Payment to a credit card, loan or Borrowed money. One-time: comes off your balance right away and lowers the debt.", "Debt payment"],
   ["in", "Income", "One-time extra money, added right away."],
 ];
 
@@ -460,16 +519,21 @@ function AddSheet({ S, onClose, onAdd }) {
   const [label, setLabel] = useState("");
   const [amt, setAmt] = useState("");
   const [debt, setDebt] = useState(S.debts[0]?.id ?? 0);
+  const [card, setCard] = useState(""); // "" = cash
   const [, short, hint, full] = KINDS.find((k) => k[0] === kind);
   const name = full || short;
-  const noDebt = kind === "credit" && S.debts.length === 0;
+  const cards = S.debts.filter((d) => d.kind === "card");
+  const canCard = (kind === "purchase" || kind === "bill") && cards.length > 0;
+  const noDebt = kind === "pay" && S.debts.length === 0;
   const submit = () => {
     const a = Math.abs(+amt);
     if (!a || noDebt) return;
     const t = { id: Date.now(), type: kind, label: label.trim() || name, amt: a };
-    if (kind === "credit") t.debt = +debt;
+    if (kind === "pay") t.debt = +debt;
+    if (canCard && card !== "") t.card = +card;
     onAdd(t);
   };
+  const kindName = { card: "credit card", loan: "loan", borrowed: "" };
   return (
     <div className="scrim on" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div className="sheet">
@@ -482,11 +546,20 @@ function AddSheet({ S, onClose, onAdd }) {
         <div className="sub" style={{ marginTop: 8, color: noDebt ? "var(--neg)" : undefined }}>
           {noDebt ? "Add a debt in the Plan tab first." : hint}
         </div>
-        {kind === "credit" && !noDebt && (
+        {kind === "pay" && !noDebt && (
           <>
-            <label htmlFor="dsel">Pays off debt</label>
+            <label htmlFor="dsel">Pay to</label>
             <select id="dsel" value={debt} onChange={(e) => setDebt(e.target.value)}>
-              {S.debts.map((x) => <option key={x.id} value={x.id}>{x.name || "Unnamed debt"}</option>)}
+              {S.debts.map((x) => <option key={x.id} value={x.id}>{(x.name || "Unnamed debt") + (kindName[x.kind] ? " · " + kindName[x.kind] : "")}</option>)}
+            </select>
+          </>
+        )}
+        {canCard && (
+          <>
+            <label htmlFor="csel">Pay with</label>
+            <select id="csel" value={card} onChange={(e) => setCard(e.target.value)}>
+              <option value="">Cash (from your balance)</option>
+              {cards.map((x) => <option key={x.id} value={x.id}>Charge to {x.name || "credit card"}</option>)}
             </select>
           </>
         )}
@@ -510,6 +583,7 @@ export default function App({ user, setUser, onLogout }) {
   const [S, setS] = useState(() => sync(settle(load(user.id))));
   const [tab, setTab] = useState("home");
   const [sheet, setSheet] = useState(false);
+  const [acct, setAcct] = useState(false); // account page, opened from the profile picture
   const wide = useWide();
   const now = useNow();
   const c = calc(S, now);
@@ -533,18 +607,24 @@ export default function App({ user, setUser, onLogout }) {
         <h1>Cashflow Live</h1>
         <div className="live"><span className="dot" />ticking</div>
         <div className="who">
-          <span className="av" title={user.email}>{user.name.trim().charAt(0).toUpperCase()}</span>
+          <button className="av" title="My account" aria-label="My account" onClick={() => setAcct((a) => !a)}>{user.name.trim().charAt(0).toUpperCase()}</button>
           <button className="lo" onClick={onLogout}>Log out</button>
         </div>
       </header>
       <main>
-        {wide
+        {acct ? (
+          <section className="acctpage" data-title="Account">
+            <button className="go sm" style={{ marginTop: 0, marginBottom: 12 }} onClick={() => setAcct(false)}>← Back to the app</button>
+            <AccountCard user={user} setUser={setUser} onLogout={onLogout} />
+            {user.role === "admin" && <UsersCard user={user} />}
+          </section>
+        ) : wide
           ? Object.entries(PAGES).map(([id, P]) => <section key={id} data-title={TITLES[id]}><P {...props} /></section>)
           : <Page {...props} />}
       </main>
       <nav>
         {TABS.map(([id, icon, label]) => (
-          <button key={id} className={tab === id ? "on" : ""} onClick={() => setTab(id)}>
+          <button key={id} className={tab === id ? "on" : ""} onClick={() => { setAcct(false); setTab(id); }}>
             <span>{icon}</span>{label}
           </button>
         ))}
