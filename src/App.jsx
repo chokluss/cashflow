@@ -1,0 +1,714 @@
+import { useEffect, useRef, useState } from "react";
+import { DEFAULT, f, mi, calc, settle, sync, debtBalPatch, cycleSummary, cycleGroups, openCycle } from "./logic.js";
+import { saveData } from "./auth.js";
+import { AccountCard, UsersCard } from "./Account.jsx";
+
+// the saved document of the signed-in user, completed with the defaults
+const load = (data) => ({ ...structuredClone(DEFAULT), ...(data || {}) });
+
+function useNow(ms = 50) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const i = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(i);
+  }, [ms]);
+  return now;
+}
+
+// on wide screens all three pages are shown side by side
+function useWide() {
+  const q = "(min-width:960px)";
+  const [wide, setWide] = useState(() => window.matchMedia(q).matches);
+  useEffect(() => {
+    const m = window.matchMedia(q);
+    const h = (e) => setWide(e.matches);
+    m.addEventListener("change", h);
+    return () => m.removeEventListener("change", h);
+  }, []);
+  return wide;
+}
+
+/* ---------------- Live tab ---------------- */
+
+function Gauge({ s, v, vmax }) {
+  const pc = Math.round(s * 100) || 0;
+  const label =
+    s >= 0.999 ? "MAX SPEED · all income, no payments"
+    : Math.abs(s) < 0.005 ? "STALL · income equals outflow"
+    : s < 0 ? "REVERSE · spending more than you earn"
+    : `Moving forward · ${pc}% of max speed`;
+  // hairline half circle: the red arc and needle show the speed (stall = top, reverse = left, max = right)
+  const r = 96, cx = 163, cy = 112, th = (s * Math.PI) / 2;
+  const ex = cx + r * Math.sin(th), ey = cy - r * Math.cos(th);
+  const nx = cx + 82 * Math.sin(th), ny = cy - 82 * Math.cos(th);
+  return (
+    <div className="card" style={{ textAlign: "center" }}>
+      <div className="lbl" style={{ textAlign: "left" }}>Money speed</div>
+      <svg viewBox="0 0 326 134" style={{ width: "100%", maxWidth: 326, marginTop: 10 }} role="img" aria-label="Money speed gauge">
+        <path d={`M${cx - r} ${cy} A${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke="#CFC8C0" strokeWidth="1.5" />
+        {Math.abs(s) > 0.005 && (
+          <path d={`M${cx} ${cy - r} A${r} ${r} 0 0 ${s >= 0 ? 1 : 0} ${ex} ${ey}`} fill="none" stroke="var(--pri)" strokeWidth="3" strokeLinecap="round" />
+        )}
+        <line x1={cx} y1={cy} x2={nx} y2={ny} stroke="var(--pri)" strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r="4" fill="var(--pri)" />
+        <circle cx={ex} cy={ey} r="4.5" fill="var(--pri)" />
+        <g fontSize="10" letterSpacing="1.6" fill="#6B6B6B" textAnchor="middle">
+          <text x={cx} y="9">STALL</text>
+          <text x={cx - r} y="130">REVERSE</text>
+          <text x={cx + r} y="130">MAX SPEED</text>
+        </g>
+      </svg>
+      <div className="big" style={{ fontSize: 26, margin: "6px 0 0", color: v < 0 ? "var(--neg)" : undefined }}>{v >= 0 ? "+" : "-"}{f(Math.abs(v), 3)} CLP / sec</div>
+      <div className="sub">{label}</div>
+      <div className="sub" style={{ marginTop: 4, fontSize: 12 }}>Max speed {f(vmax, 3)} CLP / sec · cash flow only (card charges count when you pay the card)</div>
+    </div>
+  );
+}
+
+function GoalCard({ g }) {
+  return (
+    <div className="card">
+      <div className="lbl">{g.name || "Savings goal"}</div>
+      <div className="big">{g.out}</div>
+      <div className="sub">{g.sub}</div>
+      {g.target > 0 && (
+        <>
+          <div className="bar"><i style={{ width: g.pct + "%" }} /></div>
+          <div className="sub" style={{ marginTop: 6 }}>{f(g.cur, 2)} of {f(g.target)} ({g.pct.toFixed(1).replace(".", ",")}%)</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DebtCard({ x, next }) {
+  if (!x.show) return null;
+  const card = x.kind === "card", loan = x.kind === "loan", bor = x.kind === "borrowed";
+  const nd = next.toLocaleDateString([], { day: "numeric", month: "short" });
+  return (
+    <div className="card">
+      <div className="lbl">{(x.name || "Debt") + (card ? " · credit card" : loan ? " · loan" : "")}</div>
+      <div className="big">{f(x.debt, bor ? 2 : 0)}</div>
+      {card ? (
+        <div className="sub">
+          Charged this cycle {f(x.charged)}{x.pendingBills > 0 ? ` · monthly bills ${f(x.pendingBills)} added at payday` : ""} · Paid {f(x.one)}
+        </div>
+      ) : loan ? (
+        <div className="sub">{x.pc > 0 ? `Next installment ${f(x.pc)} on ${nd}` : x.skipped ? "Installment skipped this month" : ""}</div>
+      ) : (
+        <div className="sub">{x.drate <= 0 ? "-" : "+"}{f(Math.abs(x.drate), 3)} CLP / sec</div>
+      )}
+      {(card || loan) && (
+        <>
+          <div className="bar"><i style={{ width: (card ? x.usedPct : x.loanPct) + "%", background: card && x.usedPct > 85 ? "var(--neg)" : undefined }} /></div>
+          <div className="sub" style={{ marginTop: 6 }}>
+            {card
+              ? x.limit > 0 ? `Used ${f(x.debt)} of ${f(x.limit)} · Available ${f(x.avail)}` : "Set your credit limit in the Plan tab"
+              : x.debt > 0
+              ? `Installment ${Math.min(x.count, x.instN + 1)} of ${x.count} · ${f(x.installment)} each · Paid ${f(x.loanPaid)} of ${f(x.total)} (${x.loanPct.toFixed(1).replace(".", ",")}%)`
+              : "Loan finished"}
+          </div>
+          <div className="sub" style={{ marginTop: 4 }}>
+            {loan && x.one > 0 ? `Prepaid this cycle: ${f(x.one)} · ` : ""}Status — updates at payday or when you make a debt payment
+          </div>
+        </>
+      )}
+      {bor && <div className="sub" style={{ marginTop: 6 }}>No limit · no monthly installments</div>}
+      {bor && x.added > 0 && <div className="sub" style={{ marginTop: 4 }}>Added since payday: {f(x.added)}</div>}
+      {x.def > 0 && <div className="rec" style={{ marginTop: 10 }}>Your income doesn't cover your payments — {f(x.def)} per cycle is being borrowed</div>}
+      {x.payoff && <div className="sub" style={{ marginTop: 10 }}>{x.payoff}</div>}
+    </div>
+  );
+}
+
+function Home({ c }) {
+  const neg = c.bal < 0;
+  const sg = c.net >= 0 ? "+" : "";
+  return (
+    <>
+      <div className="card">
+        <div className="proj" title="The balance this cycle would close with if nothing else changes"><span>Projected at payday{c.projBorrow > 0 ? ` · ${f(c.projBorrow)} borrowed` : ""}</span><b className={c.projected < 0 ? "neg" : "pos"}>{f(c.projected)}</b></div>
+        <div className="proj" style={{ marginTop: -6 }}><span>Total spending this cycle</span><b className="neg">{f(c.spending)}</b></div>
+        <div className="lbl">Available this cycle</div>
+        <div className={"big" + (neg ? " neg" : "")}>{f(c.bal, 2)}</div>
+        <div className={"sub rates " + (c.net < 0 ? "neg" : "pos")}>
+          <span>{c.net >= 0 ? "+" : "-"}{f(Math.abs(c.net), 3)} CLP / sec</span>
+          <span>{sg}{f(c.net * 3600)} / hour</span>
+          <span>{sg}{f(c.net * 86400)} / day</span>
+        </div>
+        {neg && <div className="rec">{c.rec}</div>}
+        <div className="bar"><i style={{ width: c.pct + "%" }} /></div>
+        <div className="sub" style={{ marginTop: 6 }}>{c.pct.toFixed(1)}% of the pay cycle elapsed · leftover moves to your goals at payday</div>
+      </div>
+      <Gauge s={c.speed} v={c.speedV} vmax={c.speedMax} />
+      {c.goals.map((g) => <GoalCard key={g.id} g={g} />)}
+      {c.debts.map((x) => <DebtCard key={x.id} x={x} next={c.next} />)}
+      <div className="grid">
+        <div className="stat"><span className="lbl">Accrued income</span><b>{f(c.inc)}</b></div>
+        <div className="stat"><span className="lbl">Accrued bills</span><b className="neg">{f(c.bil + c.paidSum)}</b></div>
+      </div>
+    </>
+  );
+}
+
+/* ---------------- Movements tab ---------------- */
+
+const dShort = (ms) => new Date(ms).toLocaleDateString([], { day: "numeric", month: "short" });
+
+function Row({ t, debtName, cardName, onDel, skipped, onSkip, onEdit }) {
+  const isIn = t.type === "in", credit = t.type === "credit", pay = t.type === "pay";
+  const icon = isIn ? "↓" : pay ? "⇄" : cardName ? "💳" : t.type === "bill" || credit ? "↻" : "↑";
+  const when = new Date(t.id).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const sub = credit
+    ? `Loan installment · ${debtName || "loan"}${skipped ? " · skipped this month" : " · monthly"}`
+    : pay ? `Payment to ${debtName || "debt"} · ${when}`
+    : t.type === "bill" ? (cardName ? `Monthly bill · charged to ${cardName}` : "Monthly bill")
+    : cardName ? `Charged to ${cardName} · ${when}` : when;
+  return (
+    <div className="tx">
+      <div className={"ic " + (isIn ? "pos" : "neg")}>{icon}</div>
+      <div className="m"><div>{t.label}</div><div className="sub">{sub}</div></div>
+      <b className={isIn ? "pos" : "neg"} style={skipped ? { textDecoration: "line-through", opacity: 0.6 } : undefined}>
+        {isIn ? "+" : "-"}{f(t.amt)}
+      </b>
+      {credit && <button className="skipb" onClick={onSkip}>{skipped ? "Restore" : "Skip"}</button>}
+      {onEdit && <button aria-label="Edit" onClick={onEdit}>✎</button>}
+      {!t.auto && <button aria-label="Delete" onClick={onDel}>✕</button>}
+    </div>
+  );
+}
+
+function EditSheet({ t, onClose, onSave }) {
+  const [label, setLabel] = useState(t.label);
+  const [amt, setAmt] = useState(String(t.amt));
+  return (
+    <div className="scrim on" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="sheet">
+        <div className="lbl">Edit movement</div>
+        <label htmlFor="el">Description</label>
+        <input id="el" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <label htmlFor="ea">Amount (CLP)</label>
+        <input id="ea" type="number" inputMode="decimal" min="0" autoFocus value={amt} onChange={(e) => setAmt(e.target.value)} />
+        <div className="cols" style={{ marginTop: 14 }}>
+          <button className="go sm" style={{ margin: 0 }} onClick={onClose}>Cancel</button>
+          <button className="go" style={{ margin: 0 }} onClick={() => Math.abs(+amt) > 0 && onSave(label.trim() || t.label, Math.abs(+amt))}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Movements({ S, c, set, onAdd }) {
+  const [editing, setEditing] = useState(null);
+  const startC = c.start.getTime();
+  // loan installments are managed from the loan; one-time movements of closed cycles are history
+  const canEdit = (t) => !t.auto && (t.type === "bill" || t.type === "credit" || t.id >= startC);
+  const del = (id) => set((s) => ({ tx: s.tx.filter((t) => t.id !== id) }));
+  const skip = (id) => set((s) => ({ tx: s.tx.map((t) => (t.id === id ? { ...t, skip: t.skip === c.key ? -1 : c.key } : t)) }));
+  const dn = (id) => S.debts.find((x) => x.id === id)?.name;
+  const bills = S.tx.filter((t) => t.type === "bill" || t.type === "credit");
+  const others = S.tx.filter((t) => t.type !== "bill" && t.type !== "credit").reverse();
+  return (
+    <>
+      <button className="addbtn" onClick={onAdd}>＋ Add bill, purchase, debt payment or income</button>
+      <div className="card">
+        <div className="lbl">Totals</div>
+        <div className="tot"><span>Monthly bills (cash)</span><span className="neg">{f(c.billsTotal)}</span></div>
+        <div className="tot"><span>Purchases (this cycle)</span><span className="neg">{f(c.purchasesAll)}</span></div>
+        {c.cardCharged > 0 && <div className="tot"><span>Charged to credit cards</span><span>{f(c.cardCharged)}</span></div>}
+        {c.payOne > 0 && <div className="tot"><span>Debt payments</span><span className="neg">{f(c.payOne)}</span></div>}
+        <div className="tot"><span>Extra income (this cycle)</span><span className="pos">{f(c.incomeX)}</span></div>
+      </div>
+      {S.tx.length === 0 && <div className="empty">Nothing added yet.<br />Tap “Add” to log a bill, a purchase, a debt payment or extra income.</div>}
+      {bills.length > 0 && (
+        <>
+          <h2>Monthly bills</h2>
+          {bills.map((t) => (
+            <Row key={t.id} t={t} debtName={dn(t.debt)} cardName={t.card ? dn(t.card) : undefined} onDel={() => del(t.id)} skipped={t.skip === c.key} onSkip={() => skip(t.id)} onEdit={canEdit(t) ? () => setEditing(t.id) : undefined} />
+          ))}
+        </>
+      )}
+      {others.length > 0 && (
+        <>
+          <h2>Purchases, payments &amp; income</h2>
+          {others.map((t) => <Row key={t.id} t={t} debtName={dn(t.debt)} cardName={t.card ? dn(t.card) : undefined} onDel={() => del(t.id)} onEdit={canEdit(t) ? () => setEditing(t.id) : undefined} />)}
+        </>
+      )}
+      {editing != null && S.tx.find((t) => t.id === editing) && (
+        <EditSheet
+          t={S.tx.find((t) => t.id === editing)}
+          onClose={() => setEditing(null)}
+          onSave={(label, amt) => { set((s) => ({ tx: s.tx.map((t) => (t.id === editing ? { ...t, label, amt } : t)) })); setEditing(null); }}
+        />
+      )}
+    </>
+  );
+}
+
+/* ---------------- History tab ---------------- */
+
+function CycleCard({ title, tag, cy, open, onClick }) {
+  const s = cycleSummary(cy, open);
+  const mx = Math.max(s.income, s.spent, 1);
+  return (
+    <div className={"card" + (onClick ? " tap" : "")} onClick={onClick}>
+      <div className="hh"><span className="lbl">{title}</span><b className={cy.closing < 0 ? "neg" : "pos"}>{tag}</b></div>
+      <div className="sub" style={{ marginTop: 8 }}>Income {f(s.income)}</div>
+      <div className="hbar pos"><i style={{ width: (s.income / mx) * 100 + "%" }} /></div>
+      <div className="sub">Spending {f(s.spent)}</div>
+      <div className="hbar neg"><i style={{ width: (s.spent / mx) * 100 + "%" }} /></div>
+      {s.rows.map(([l, v, k]) => <div className="hrow" key={l}><span>{l}</span><span className={k}>{v}</span></div>)}
+      {cy.moved?.length > 0 && (
+        <div className="sub" style={{ marginTop: 10 }}>
+          → {cy.moved.map((m) => `${m.name || "Savings"} ${m.amt > 0 ? "+" : ""}${f(m.amt)}`).join(" · ")}
+        </div>
+      )}
+      {onClick && <div className="sub" style={{ marginTop: 8 }}>Tap to see movements ›</div>}
+    </div>
+  );
+}
+
+// read-only view of one closed cycle
+function CycleDetail({ cy, onClose }) {
+  const s = cycleSummary(cy);
+  const groups = cycleGroups(cy);
+  return (
+    <div className="scrim on" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="sheet det">
+        <div className="hh">
+          <span className="lbl">{dShort(cy.start)} – {dShort(cy.end - 1)}</span>
+          <b className={cy.closing < 0 ? "neg" : "pos"}>Closed {cy.closing > 0 ? "+" : ""}{f(cy.closing)}</b>
+        </div>
+        <div className="sub" style={{ margin: "6px 0 10px" }}>Read only</div>
+        {s.rows.map(([l, v, k]) => <div className="hrow" key={l}><span>{l}</span><span className={k}>{v}</span></div>)}
+        {groups.length === 0 && <div className="empty">No movement detail was saved for this cycle.</div>}
+        {groups.map((g) => (
+          <div key={g.title}>
+            <h2>{g.title}</h2>
+            {g.rows.map((r, i) => (
+              <div className="tx" key={i}>
+                <div className={"ic " + r.cls}>{r.icon}</div>
+                <div className="m"><div>{r.label}</div><div className="sub">{r.sub}</div></div>
+                <b className={r.cls} style={r.skipped ? { textDecoration: "line-through", opacity: 0.6 } : undefined}>{r.amt}</b>
+              </div>
+            ))}
+          </div>
+        ))}
+        <button className="go" onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+function History({ S, c }) {
+  const [sel, setSel] = useState(null);
+  const cy = [...(S.cycles || [])].reverse();
+  const sum = (fn) => cy.reduce((t, x) => t + fn(x), 0);
+  return (
+    <>
+      <CycleCard title="This cycle so far" tag={f(c.bal)} cy={openCycle(c)} open />
+      {cy.length === 0 && <div className="empty">No closed cycles yet.<br />Each pay cycle closes at payday and appears here.</div>}
+      {cy.length > 0 && (
+        <div className="card">
+          <div className="lbl">All closed cycles</div>
+          <div className="hrow"><span>Cycles closed</span><span>{cy.length}</span></div>
+          <div className="hrow"><span>Total income</span><span className="pos">{f(sum((x) => (x.salary || 0) + (x.income || 0)))}</span></div>
+          <div className="hrow"><span>Total spending</span><span className="neg">{f(sum((x) => (x.bills || 0) + (x.purchases || 0)))}</span></div>
+          <div className="hrow"><span>Saved to goals</span><span className="pos">{f(sum((x) => x.closing || 0))}</span></div>
+        </div>
+      )}
+      {cy.map((x) => (
+        <CycleCard key={x.key} title={`${dShort(x.start)} – ${dShort(x.end - 1)}`} tag={`Closed ${x.closing > 0 ? "+" : ""}${f(x.closing)}`} cy={x} onClick={() => setSel(x.key)} />
+      ))}
+      {sel != null && cy.find((x) => x.key === sel) && <CycleDetail cy={cy.find((x) => x.key === sel)} onClose={() => setSel(null)} />}
+    </>
+  );
+}
+
+/* ---------------- Plan tab ---------------- */
+
+const num = (v) => +v || 0;
+
+function DebtRow({ x, c, set }) {
+  const kind = x.kind, bor = kind === "borrowed", loan = kind === "loan";
+  const liveDebt = c.debts.find((o) => o.id === x.id)?.debt ?? 0;
+  const [u, setU] = useState(() => String(Math.round(liveDebt))); // card: used credit | borrowed: balance
+  const [lim, setLim] = useState(() => String(Math.round(+x.limit || 0))); // card: available credit (the limit)
+  const [cnt, setCnt] = useState(() => String(+x.count || 0));
+  const [amt, setAmt] = useState(() => String(+x.installment || 0));
+  const [pd, setPd] = useState(() => String(+x.installment > 0 ? Math.max(0, Math.round((+x.count || 0) - liveDebt / x.installment)) : 0));
+  const setBal = (s, fields, bal) => debtBalPatch(s, x.id, bal).map((o) => (o.id === x.id ? { ...o, ...fields } : o));
+  const loanUpd = (n, m, p) => set((s) => ({ debts: setBal(s, { count: n, installment: m }, Math.max(0, (n - p) * m)) }));
+  const input = (value, onChange) => <input type="number" inputMode="decimal" min="0" value={value} onChange={(e) => onChange(e.target.value)} />;
+  return (
+    <div className="item">
+      <div className="hd">
+        <input placeholder={loan ? "Loan name (car, house…)" : "Name (credit card…)"} value={x.name} disabled={bor}
+          onChange={(e) => set((s) => ({ debts: s.debts.map((o) => (o.id === x.id ? { ...o, name: e.target.value } : o)) }))} />
+        {!bor && (
+          <button className="xb" aria-label="Remove debt"
+            onClick={() => set((s) => ({
+              debts: s.debts.filter((o) => o.id !== x.id),
+              tx: s.tx.filter((t) => t.debt !== x.id && t.card !== x.id).map((t) => t),
+            }))}>✕</button>
+        )}
+      </div>
+      {kind === "card" && (
+        <>
+          <div className="cols">
+            <div><div className="mini">Used credit (CLP)</div>{input(u, (v) => { setU(v); set((s) => ({ debts: debtBalPatch(s, x.id, num(v)) })); })}</div>
+            <div><div className="mini">Available credit (CLP)</div>{input(lim, (v) => { setLim(v); set((s) => ({ debts: s.debts.map((o) => (o.id === x.id ? { ...o, limit: num(v) } : o)) })); })}</div>
+          </div>
+          <div className="sub" style={{ marginTop: 8 }}>
+            Left to use: <b>{f(Math.max(0, (+x.limit || 0) - liveDebt))}</b> (available credit minus used credit)
+          </div>
+          <div className="sub" style={{ marginTop: 6 }}>
+            No fixed installment: charge purchases and bills to this card when you add them in Movements, and pay it whenever you like with a debt payment.
+          </div>
+        </>
+      )}
+      {loan && (
+        <>
+          <div className="cols">
+            <div><div className="mini">Number of installments</div>{input(cnt, (v) => { setCnt(v); loanUpd(num(v), num(amt), num(pd)); })}</div>
+            <div><div className="mini">Each installment (CLP)</div>{input(amt, (v) => { setAmt(v); loanUpd(num(cnt), num(v), num(pd)); })}</div>
+          </div>
+          <div className="mini">Installments already paid</div>
+          {input(pd, (v) => { setPd(v); loanUpd(num(cnt), num(amt), num(v)); })}
+          <div className="sub" style={{ marginTop: 8 }}>
+            Total {f(num(cnt) * num(amt))} · Remaining <b>{f(liveDebt)}</b>
+          </div>
+          <div className="sub" style={{ marginTop: 6 }}>While the loan is active, its monthly installment appears automatically in Movements (you can skip a month there).</div>
+        </>
+      )}
+      {bor && (
+        <>
+          <div className="mini">Balance (CLP)</div>
+          {input(u, (v) => { setU(v); set((s) => ({ debts: debtBalPatch(s, x.id, num(v)) })); })}
+          <div className="sub" style={{ marginTop: 8 }}>
+            Created automatically when your income doesn't cover your payments. No limit and no installments — pay it back whenever you can.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function GoalRow({ g, i, set }) {
+  const upd = (patch) => set((s) => ({ goals: s.goals.map((o) => (o.id === g.id ? { ...o, ...patch } : o)) }));
+  return (
+    <div className="item">
+      <div className="hd">
+        <input placeholder="Goal name (vacation, laptop…)" value={g.name} onChange={(e) => upd({ name: e.target.value })} />
+        {i > 0 && (
+          <button className="xb" aria-label="Move up"
+            onClick={() => set((s) => { const a = [...s.goals]; [a[i - 1], a[i]] = [a[i], a[i - 1]]; return { goals: a }; })}>↑</button>
+        )}
+        <button className="xb" aria-label="Remove goal" onClick={() => set((s) => ({ goals: s.goals.filter((o) => o.id !== g.id) }))}>✕</button>
+      </div>
+      <div className="cols">
+        <div>
+          <div className="mini">Target (CLP)</div>
+          <input type="number" inputMode="decimal" min="0" value={g.target} onChange={(e) => upd({ target: +e.target.value || 0 })} />
+        </div>
+        <div>
+          <div className="mini">Already saved (CLP)</div>
+          <input type="number" inputMode="decimal" min="0" value={g.saved} onChange={(e) => upd({ saved: +e.target.value || 0 })} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfirmButton({ label, onConfirm }) {
+  const [sure, setSure] = useState(false);
+  useEffect(() => {
+    if (!sure) return;
+    const t = setTimeout(() => setSure(false), 4000);
+    return () => clearTimeout(t);
+  }, [sure]);
+  return (
+    <button
+      className="go"
+      style={{ marginTop: 0, background: sure ? "var(--neg)" : "var(--chip)", color: sure ? "#fff" : "var(--ink)" }}
+      onClick={() => { if (sure) { onConfirm(); setSure(false); } else setSure(true); }}
+    >
+      {sure ? "Tap again to confirm" : label}
+    </button>
+  );
+}
+
+// move your data in or out: a JSON file, or what an older version saved in this browser
+function Backup({ S, set }) {
+  const [msg, setMsg] = useState("");
+  const legacy = (() => {
+    try {
+      const k = Object.keys(localStorage).find((x) => x.startsWith("cashflow:data:") || x.startsWith("cashflow-clp-"));
+      return k ? JSON.parse(localStorage.getItem(k)) : null;
+    } catch { return null; }
+  })();
+  const apply = (obj) => {
+    if (!obj || !Array.isArray(obj.tx) || !Array.isArray(obj.debts)) { setMsg("That file doesn't look like a Cashflow Live backup."); return; }
+    if (!window.confirm("Replace your current data with this backup?")) return;
+    set(() => ({ ...structuredClone(DEFAULT), ...obj }));
+    setMsg("Data imported.");
+  };
+  return (
+    <div className="card">
+      <div className="lbl">Backup</div>
+      <div className="sub" style={{ margin: "8px 0 12px" }}>Download your data, or load a backup file. Your data is also saved online automatically.</div>
+      <button className="go sm" style={{ margin: 0 }} onClick={() => {
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 2)], { type: "application/json" }));
+        a.download = "cashflow-backup.json";
+        a.click();
+      }}>Export my data</button>
+      <label className="go sm" style={{ display: "block", textAlign: "center", cursor: "pointer", marginTop: 8 }}>
+        Import from a file
+        <input type="file" accept="application/json,.json" hidden onChange={async (e) => {
+          const file = e.target.files[0];
+          e.target.value = "";
+          if (!file) return;
+          try { apply(JSON.parse(await file.text())); } catch { setMsg("Could not read that file."); }
+        }} />
+      </label>
+      {legacy && <button className="go sm" style={{ marginTop: 8 }} onClick={() => apply(legacy)}>Import data found in this browser (older version)</button>}
+      {msg && <div className="sub" style={{ marginTop: 8 }}>{msg}</div>}
+    </div>
+  );
+}
+
+function ClearData({ set }) {
+  return (
+    <div className="card">
+      <div className="lbl">Data</div>
+      <div className="sub" style={{ margin: "8px 0 12px" }}>Remove every bill, purchase, debt payment and income entry you've added.</div>
+      <ConfirmButton label="Clear all bills & movements" onConfirm={() => set({ tx: [] })} />
+      <div className="sub" style={{ margin: "16px 0 12px" }}>
+        Delete all your closed months from the History tab. Your goals' saved money, debts and movements stay as they are.
+      </div>
+      <ConfirmButton label="Delete all history (closed cycles)" onConfirm={() => set({ cycles: [] })} />
+    </div>
+  );
+}
+
+function Plan({ S, c, set, user, setUser, onLogout }) {
+  const [newKind, setNewKind] = useState("card");
+  return (
+    <>
+      <div className="card">
+        <div className="lbl">Monthly income</div>
+        <label htmlFor="sal">Monthly salary (CLP)</label>
+        <input id="sal" type="number" inputMode="decimal" min="0" value={S.salary} onChange={(e) => set({ salary: +e.target.value || 0 })} />
+        <label htmlFor="pday">Payment day (day of the month you get paid)</label>
+        <input id="pday" type="number" inputMode="numeric" min="1" max="31" value={S.payday}
+          onChange={(e) => { const n = Math.round(+e.target.value); if (n >= 1 && n <= 31) set((s) => ({ payday: n, cycleKey: calc({ ...s, payday: n }).key })); }} />
+        <div className="sub" style={{ marginTop: 10 }}>
+          Next payday: {c.next.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}
+        </div>
+        <div className="tot"><span>Monthly bills (incl. loan installments)</span><span className="neg">{f(c.billsTotal)}</span></div>
+        <div className="tot"><span>Net per cycle</span><span>{f(c.sal - c.billsTotal)}</span></div>
+      </div>
+
+      <div className="card">
+        <div className="lbl">Debts</div>
+        {S.debts.length === 0 && <div className="empty" style={{ padding: 8 }}>No debts yet.</div>}
+        {S.debts.map((x) => <DebtRow key={x.id} x={x} c={c} set={set} />)}
+        <div className="mini" style={{ marginTop: 14 }}>Add a debt — choose the type</div>
+        <div className="seg" style={{ margin: "6px 0 0" }}>
+          <button className={newKind === "card" ? "on" : ""} onClick={() => setNewKind("card")}>Credit card</button>
+          <button className={newKind === "loan" ? "on" : ""} onClick={() => setNewKind("loan")}>Loan</button>
+        </div>
+        <button className="go sm" onClick={() => set((s) => ({
+          debts: [...s.debts, newKind === "card" ? { id: Date.now(), kind: "card", name: "", bal: 0, limit: 0 } : { id: Date.now(), kind: "loan", name: "", bal: 0, count: 0, installment: 0 }],
+        }))}>＋ Add {newKind === "card" ? "credit card" : "loan"}</button>
+        <div className="sub" style={{ marginTop: 10 }}>
+          {newKind === "card"
+            ? "Credit card: no fixed installments, since the amount changes every month. Charge purchases to it and pay it when you want."
+            : "Loan: set the number of installments and the amount of each one. While it is active, the installment shows up automatically in Movements."}
+          {" "}If your income doesn't cover bills plus installments, the difference is borrowed automatically into a "Borrowed money" debt.
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="lbl">Savings goals</div>
+        {S.goals.length === 0 && <div className="empty" style={{ padding: 8 }}>No goals yet.</div>}
+        {S.goals.map((g, i) => <GoalRow key={g.id} g={g} i={i} set={set} />)}
+        <button className="go sm" onClick={() => set((s) => ({ goals: [...s.goals, { id: Date.now(), name: "", target: 0, saved: 0 }] }))}>＋ Add goal</button>
+        <div className="sub" style={{ marginTop: 10 }}>
+          Money left at the end of each pay cycle moves to your goals automatically, in the order listed (use ↑ to change the priority). If every goal is met, or you have none, it goes to a Savings item. Each projection assumes your net income per second stays the same.
+        </div>
+      </div>
+      <Backup S={S} set={set} />
+      <ClearData set={set} />
+    </>
+  );
+}
+
+/* ---------------- Add sheet ---------------- */
+
+const KINDS = [
+  ["purchase", "Purchase", "One-time: comes off your balance right away, unless you charge it to a credit card."],
+  ["bill", "Bill", "Monthly: spread evenly across every second of the pay cycle. You can charge it to a credit card."],
+  ["pay", "Payment", "Payment to a credit card, loan or Borrowed money. One-time: comes off your balance right away and lowers the debt.", "Debt payment"],
+  ["in", "Income", "One-time extra money, added right away."],
+];
+
+function AddSheet({ S, onClose, onAdd }) {
+  const [kind, setKind] = useState("purchase");
+  const [label, setLabel] = useState("");
+  const [amt, setAmt] = useState("");
+  const [debt, setDebt] = useState(S.debts[0]?.id ?? 0);
+  const [card, setCard] = useState(""); // "" = cash
+  const [, short, hint, full] = KINDS.find((k) => k[0] === kind);
+  const name = full || short;
+  const cards = S.debts.filter((d) => d.kind === "card");
+  const canCard = (kind === "purchase" || kind === "bill") && cards.length > 0;
+  const noDebt = kind === "pay" && S.debts.length === 0;
+  const submit = () => {
+    const a = Math.abs(+amt);
+    if (!a || noDebt) return;
+    const t = { id: Date.now(), type: kind, label: label.trim() || name, amt: a };
+    if (kind === "pay") t.debt = +debt;
+    if (canCard && card !== "") t.card = +card;
+    onAdd(t);
+  };
+  const kindName = { card: "credit card", loan: "loan", borrowed: "" };
+  return (
+    <div className="scrim on" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="sheet">
+        <div className="lbl">New movement</div>
+        <div className="seg">
+          {KINDS.map(([id, text]) => (
+            <button key={id} className={kind === id ? "on" : ""} onClick={() => setKind(id)}>{text}</button>
+          ))}
+        </div>
+        <div className="sub" style={{ marginTop: 8, color: noDebt ? "var(--neg)" : undefined }}>
+          {noDebt ? "Add a debt in the Plan tab first." : hint}
+        </div>
+        {kind === "pay" && !noDebt && (
+          <>
+            <label htmlFor="dsel">Pay to</label>
+            <select id="dsel" value={debt} onChange={(e) => setDebt(e.target.value)}>
+              {S.debts.map((x) => <option key={x.id} value={x.id}>{(x.name || "Unnamed debt") + (kindName[x.kind] ? " · " + kindName[x.kind] : "")}</option>)}
+            </select>
+          </>
+        )}
+        {canCard && (
+          <>
+            <label htmlFor="csel">Pay with</label>
+            <select id="csel" value={card} onChange={(e) => setCard(e.target.value)}>
+              <option value="">Cash (from your balance)</option>
+              {cards.map((x) => <option key={x.id} value={x.id}>Charge to {x.name || "credit card"}</option>)}
+            </select>
+          </>
+        )}
+        <label htmlFor="tl">Description</label>
+        <input id="tl" placeholder="Rent, groceries, bonus…" value={label} onChange={(e) => setLabel(e.target.value)} />
+        <label htmlFor="ta">Amount (CLP)</label>
+        <input id="ta" type="number" inputMode="decimal" min="0" placeholder="0" autoFocus value={amt} onChange={(e) => setAmt(e.target.value)} />
+        <button className="go" onClick={submit}>Add {name.toLowerCase()}</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- App ---------------- */
+
+const PAGES = { home: Home, moves: Movements, hist: History, plan: Plan };
+const TITLES = { home: "Live", moves: "Movements", hist: "History", plan: "Plan & settings" };
+const TABS = [["home", "◉", "Live"], ["moves", "☰", "Moves"], ["hist", "▦", "History"], ["plan", "★", "Plan"]];
+
+export default function App({ user, setUser, onLogout, initial }) {
+  const [S, setS] = useState(() => sync(settle(load(initial.data))));
+  const [tab, setTab] = useState("home");
+  const [sheet, setSheet] = useState(false);
+  const [acct, setAcct] = useState(false); // account page, opened from the profile picture
+  const wide = useWide();
+  const now = useNow();
+  const c = calc(S, now);
+
+  // ---- saving to the database: shortly after a change, and when the tab is hidden ----
+  const rev = useRef(initial.rev); // version we last saved or loaded
+  const latest = useRef(S);
+  const savedJson = useRef(JSON.stringify(initial.data || {}));
+  const saving = useRef({ busy: false, again: false });
+  const [conflict, setConflict] = useState(false);
+  const [saveErr, setSaveErr] = useState("");
+  const flush = async () => {
+    const st = saving.current;
+    if (st.busy) { st.again = true; return; }
+    st.busy = true;
+    try {
+      do {
+        st.again = false;
+        const json = JSON.stringify(latest.current);
+        if (json === savedJson.current) break;
+        rev.current = await saveData(user.id, latest.current, rev.current);
+        savedJson.current = json;
+      } while (st.again);
+      setSaveErr("");
+    } catch (e) {
+      if (e.message === "CONFLICT") setConflict(true);
+      else setSaveErr("Could not save. Check your connection; we'll retry.");
+    } finally {
+      st.busy = false;
+    }
+  };
+  useEffect(() => {
+    latest.current = S;
+    if (conflict) return;
+    const t = setTimeout(flush, 800);
+    return () => clearTimeout(t);
+  }, [S, conflict, saveErr]);
+  useEffect(() => {
+    const h = () => document.visibilityState === "hidden" && flush();
+    document.addEventListener("visibilitychange", h);
+    return () => document.removeEventListener("visibilitychange", h);
+  }, []);
+
+  useEffect(() => {
+    if (S.cycleKey !== c.key || c.needBorrow) setS((x) => sync(settle(x))); // payday passed: close the cycle
+  });
+
+  // every change first folds finished cycles into the stored debt balances (settle)
+  const set = (p) => setS((x) => { const s = settle(x); return sync({ ...s, ...(typeof p === "function" ? p(s) : p) }); });
+  const Page = PAGES[tab];
+  const props = { S, c, set, onAdd: () => setSheet(true), user, setUser, onLogout };
+
+  return (
+    <div className="app">
+      {conflict && (
+        <div className="banner">Your data was changed on another device. <button onClick={() => window.location.reload()}>Reload</button></div>
+      )}
+      {saveErr && !conflict && <div className="banner">{saveErr}</div>}
+      <header>
+        <h1>Cashflow Live</h1>
+        <div className="live"><span className="dot" />ticking</div>
+        <div className="who">
+          <button className="av" title="My account" aria-label="My account" onClick={() => setAcct((a) => !a)}>{user.name.trim().charAt(0).toUpperCase()}</button>
+          <button className="lo" onClick={onLogout}>Log out</button>
+        </div>
+      </header>
+      <main>
+        {acct ? (
+          <section className="acctpage" data-title="Account">
+            <button className="go sm" style={{ marginTop: 0, marginBottom: 12 }} onClick={() => setAcct(false)}>← Back to the app</button>
+            <AccountCard user={user} setUser={setUser} onLogout={onLogout} />
+            {user.role === "admin" && <UsersCard user={user} />}
+          </section>
+        ) : wide
+          ? Object.entries(PAGES).map(([id, P]) => <section key={id} data-title={TITLES[id]}><P {...props} /></section>)
+          : <Page {...props} />}
+      </main>
+      <nav>
+        {TABS.map(([id, icon, label]) => (
+          <button key={id} className={tab === id ? "on" : ""} onClick={() => { setAcct(false); setTab(id); }}>
+            <span>{icon}</span>{label}
+          </button>
+        ))}
+      </nav>
+      {sheet && <AddSheet S={S} onClose={() => setSheet(false)} onAdd={(t) => { set((s) => ({ tx: [...s.tx, t] })); setSheet(false); }} />}
+    </div>
+  );
+}
